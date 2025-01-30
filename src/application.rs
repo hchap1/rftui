@@ -78,8 +78,8 @@ impl Application {
 
         while self.running {
             self.event_loop();
-            self.browse_state.select(Some(self.selected));
-            self.preview_state.select(Some(self.preview_line));
+            if self.state == State::Browsing { self.browse_state.select(Some(self.selected)); } else { self.browse_state.select(None); }
+            if self.state == State::Previewing { self.preview_state.select(Some(self.preview_line)); } else { self.preview_state.select(None); }
             match terminal.draw(|frame| self.draw(frame, layout.clone())) {
                 Ok(_) => {},
                 Err(_) => self.running = false
@@ -116,8 +116,8 @@ impl Application {
                         'j' => {
                             match self.state {
                                 State::Searching => {}
-                                State::Browsing => if self.selected < self.length - 1 { self.selected += 1 },
-                                State::Previewing => if self.preview_line < self.preview_length - 1 { self.preview_line += 1 }
+                                State::Browsing => if self.length > 0 { if self.selected < self.length - 1 { self.selected += 1 }},
+                                State::Previewing => if self.preview_length > 0 { if self.preview_line < self.preview_length - 1 { self.preview_line += 1 }}
                             }
                         }
                         'k' => {
@@ -150,8 +150,7 @@ impl Application {
             KeyCode::Enter => {
                 match self.state {
                     State::Searching => self.state = State::Browsing,
-                    State::Browsing => self.cd(),
-                    State::Previewing => {}
+                    _ => self.cd(),
                 }
             }
             _ => {}
@@ -159,11 +158,23 @@ impl Application {
     }
 
     fn cd(&mut self) {
-        if self.filtered[self.selected].is_dir() {
-            self.cwd = self.filtered[self.selected].clone();
-            let _ = get_directory_contents(&self.cwd, &mut self.contents);
-            self.input.clear();
-            self.selected = 0;
+        if self.state == State::Browsing {
+            if self.filtered[self.selected].is_dir() {
+                self.cwd = self.filtered[self.selected].clone();
+                let _ = get_directory_contents(&self.cwd, &mut self.contents);
+                self.input.clear();
+                self.selected = 0;
+            }
+        } else {
+            if self.filtered[self.selected].is_dir() {
+                let _ = get_directory_contents(&self.filtered[self.selected], &mut self.contents);
+                self.cwd = self.contents[self.preview_line].clone();
+                let _ = get_directory_contents(&self.cwd, &mut self.contents);
+                self.input.clear();
+                self.state = State::Browsing;
+                self.selected = 0;
+                self.preview_line = 0;
+            }
         }
     }
 
