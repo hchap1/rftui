@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::fs::{read_to_string, read_dir};
+use std::fs::read_dir;
 use std::mem::replace;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
@@ -15,15 +15,6 @@ pub fn get_directory_contents(path: &PathBuf, dump: &mut Vec<PathBuf>) -> Result
     };
     let _ = replace(dump, contents.filter_map(Result::ok).map(|x| x.path()).collect());
     Ok(dump.len())
-}
-
-pub fn get_raw_contents(path: &PathBuf) -> Vec<String> {
-    let contents = match read_to_string(path) {
-        Ok(contents) => contents,
-        Err(_) => return vec![]
-    };
-
-    contents.lines().map(|x| x.to_string()).collect()
 }
 
 pub struct SyntaxHighlighter {
@@ -45,7 +36,10 @@ impl SyntaxHighlighter {
         let mut output: Vec<SyntaxLine> = vec![];
         let mut file = File::open(path).unwrap();
         let mut contents = String::new();
-        file.read_to_string(&mut contents).unwrap();
+        match file.read_to_string(&mut contents) {
+            Ok(_) => {},
+            Err(_) => return vec![]
+        }
 
         let syntax: &SyntaxReference = self.ps.find_syntax_by_extension(
             match path.extension() {

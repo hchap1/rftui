@@ -6,12 +6,13 @@ use ratatui::{
 };
 use std::rc::Rc;
 
-use crate::filesystem::{get_directory_contents, get_raw_contents, SyntaxHighlighter, SyntaxLine};
+use crate::filesystem::{get_directory_contents, SyntaxHighlighter, SyntaxLine};
 
 #[derive(PartialEq, Eq)]
 enum State {
     Browsing,
-    Searching
+    Searching,
+    Previewing
 }
 
 pub struct Application {
@@ -19,11 +20,14 @@ pub struct Application {
     contents: Vec<PathBuf>,
     filtered: Vec<PathBuf>,
     length: usize,
+    preview_length: usize,
     selected: usize,
+    preview_line: usize,
     running: bool,
     input: String,
     state: State,
     browse_state: ListState,
+    preview_state: ListState,
     pub clipboard: Option<String>,
     highlighter: SyntaxHighlighter
 }
@@ -35,11 +39,14 @@ impl Application {
             contents: vec![],
             filtered: vec![],
             length: 0,
+            preview_length: 0,
             selected: 0,
+            preview_line: 0,
             running: true,
             input: String::new(),
             state: State::Browsing,
             browse_state: ListState::default(),
+            preview_state: ListState::default(),
             clipboard: None,
             highlighter: SyntaxHighlighter::new()
         };
@@ -59,8 +66,8 @@ impl Application {
         // Layout
         let layout = Layout::default().direction(ratatui::layout::Direction::Horizontal)
             .constraints(vec![
-                    Constraint::Percentage(50),
-                    Constraint::Percentage(50)
+                    Constraint::Percentage(30),
+                    Constraint::Percentage(70)
             ]).split(terminal.get_frame().area());
 
         self.browse_state.select(Some(self.selected));
@@ -72,6 +79,7 @@ impl Application {
         while self.running {
             self.event_loop();
             self.browse_state.select(Some(self.selected));
+            self.preview_state.select(Some(self.preview_line));
             match terminal.draw(|frame| self.draw(frame, layout.clone())) {
                 Ok(_) => {},
                 Err(_) => self.running = false
@@ -105,12 +113,26 @@ impl Application {
                     match c {
                         'q' => self.running = false,
                         'i' => self.state = State::Searching,
-                        'j' => if self.selected < self.length - 1 { self.selected += 1 },
-                        'k' => if self.selected > 0 { self.selected -= 1 },
+                        'j' => {
+                            match self.state {
+                                State::Searching => {}
+                                State::Browsing => if self.selected < self.length - 1 { self.selected += 1 },
+                                State::Previewing => if self.preview_line < self.preview_length - 1 { self.preview_line += 1 }
+                            }
+                        }
+                        'k' => {
+                            match self.state {
+                                State::Searching => {}
+                                State::Browsing => if self.selected > 0 { self.selected -= 1 },
+                                State::Previewing => if self.preview_line > 0 { self.preview_line -= 1 }
+                            }
+                        }
                         'y' => {
                             self.clipboard = Some(self.filtered[self.selected].canonicalize().unwrap().to_string_lossy().to_string());
                             self.running = false;
                         },
+                        'l' => { self.state = State::Previewing; self.preview_line = 0 },
+                        'h' => { self.state = State::Browsing; self.selected = 0 },
                          _  => {}
                     }
                 }
@@ -122,13 +144,14 @@ impl Application {
             KeyCode::Backspace => {
                 match self.state {
                     State::Searching => { self.input.pop(); },
-                    State::Browsing => self.back()
+                    _ => self.back()
                 }
             },
             KeyCode::Enter => {
                 match self.state {
                     State::Searching => self.state = State::Browsing,
-                    State::Browsing => self.cd()
+                    State::Browsing => self.cd(),
+                    State::Previewing => {}
                 }
             }
             _ => {}
@@ -164,7 +187,7 @@ impl Application {
         let title = Line::from(format!("[ {} - [{}] ]", self.cwd.to_str().unwrap(), if self.input.is_empty() { String::from(".*") } else { self.input.clone() }).bold()).green();
         let input = match self.state {
             State::Searching => Line::from(format!("[ {} ]", self.input).white()),
-            State::Browsing => Line::from(format!(" {}/{} ", self.selected + 1, self.length))
+            _ => Line::from(format!(" {}/{} ", self.selected + 1, self.length))
         };
 
 
@@ -198,8 +221,20 @@ impl Application {
         if self.filtered.len() > 0 {
             if self.filtered[self.selected].is_file() {
                 preview = self.highlighter.load_file(&self.filtered[self.selected]);
+            } else if self.filtered[self.selected].is_dir() {
+                let mut entries: Vec<PathBuf> = vec![];
+                let _ = get_directory_contents(&self.filtered[self.selected], &mut entries);
+                preview = entries.iter().map(|x| SyntaxLine {
+                    text: vec![x.file_name().unwrap().to_string_lossy().to_string()],
+                    colour: match x.is_dir() {
+                        true => vec![(10, 10, 150)],
+                        false => vec![(200, 200, 200)]
+                    }
+                }).collect();
             }
         }
+
+        self.preview_length = preview.len();
 
         let preview_list = List::from(
             preview.iter().map(|x|
@@ -213,19 +248,16 @@ impl Application {
                     )).collect::<Vec<Span<>>>()
                 )
             ).collect()
-        );
+        ).highlight_style(Style::new()).highlight_symbol(">>").repeat_highlight_symbol(true);
 
         let block2 = if self.filtered.len() > 0 {
-            if self.filtered[self.selected].is_dir() {
-                Block::bordered().title(Line::from(format!("{}", self.filtered[self.selected].file_name().unwrap().to_string_lossy().to_string())).centered())
-            } else {
-                Block::bordered().title(Line::from(" - ").centered())
-            }.border_set(border::THICK)
+            Block::bordered().title(Line::from(format!("[ {} ]", self.filtered[self.selected].file_name().unwrap().to_string_lossy().to_string()).blue()).centered())
+                .border_set(border::THICK)
         } else {
             Block::bordered().title(Line::from(" - ").centered()).border_set(border::THICK)
         };
 
         frame.render_stateful_widget(filelist.block(block), layout[0], &mut self.browse_state);
-        frame.render_stateful_widget(preview_list.block(block2), layout[1], &mut self.browse_state);
+        frame.render_stateful_widget(preview_list.block(block2), layout[1], &mut self.preview_state);
     }
 }
