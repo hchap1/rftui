@@ -1,0 +1,235 @@
+use std::path::PathBuf;
+use regex::Regex;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use ratatui::{
+    style::Style,
+    layout::{Constraint, Layout, Rect},
+    style::Stylize,
+    symbols::border,
+    text::Line,
+    widgets::{Block, List, ListState},
+    DefaultTerminal, Frame,
+};
+use std::rc::Rc;
+
+use crate::filesystem::{get_directory_contents, get_raw_contents};
+
+#[derive(PartialEq, Eq)]
+enum State {
+    Browsing,
+    Searching
+}
+
+pub struct Application {
+    cwd: PathBuf,
+    contents: Vec<PathBuf>,
+    filtered: Vec<PathBuf>,
+    length: usize,
+    selected: usize,
+    running: bool,
+    input: String,
+    state: State,
+    browse_state: ListState,
+    pub clipboard: Option<String>
+}
+
+impl Application {
+    pub fn new(entry: PathBuf) -> Self {
+        let mut application = Self {
+            cwd: entry,
+            contents: vec![],
+            filtered: vec![],
+            length: 0,
+            selected: 0,
+            running: true,
+            input: String::new(),
+            state: State::Browsing,
+            browse_state: ListState::default(),
+            clipboard: None
+        };
+
+        match get_directory_contents(&application.cwd, &mut application.contents) {
+            Ok(_) => {},
+            Err(_) => {}
+        };
+
+        application.filtered = application.contents.clone();
+        application.length = application.contents.len();
+        application
+    }
+
+    pub fn run(&mut self, terminal: &mut DefaultTerminal) {
+
+        // Layout
+        let layout = Layout::default().direction(ratatui::layout::Direction::Horizontal)
+            .constraints(vec![
+                    Constraint::Percentage(50),
+                    Constraint::Percentage(50)
+            ]).split(terminal.get_frame().area());
+
+        self.browse_state.select(Some(self.selected));
+        match terminal.draw(|frame| self.draw(frame, layout.clone())) {
+            Ok(_) => {},
+            Err(_) => self.running = false
+        }
+
+        while self.running {
+            self.event_loop();
+            self.browse_state.select(Some(self.selected));
+            match terminal.draw(|frame| self.draw(frame, layout.clone())) {
+                Ok(_) => {},
+                Err(_) => self.running = false
+            }
+        }
+    }
+
+    fn event_loop(&mut self) {
+        let e = match event::read() {
+            Ok(events) => events,
+            Err(_) => {
+                self.running = false;
+                return;
+            }
+        };
+
+        match e {
+            Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                self.handle_key_event(key_event)
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_key_event(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Char(c) => {
+                if self.state == State::Searching {
+                    self.input.push(c);
+                } else {
+                    match c {
+                        'q' => self.running = false,
+                        'i' => self.state = State::Searching,
+                        'j' => if self.selected < self.length - 1 { self.selected += 1 },
+                        'k' => if self.selected > 0 { self.selected -= 1 },
+                        'y' => {
+                            self.clipboard = Some(self.filtered[self.selected].canonicalize().unwrap().to_string_lossy().to_string());
+                            self.running = false;
+                        },
+                         _  => {}
+                    }
+                }
+            }
+            KeyCode::Esc => if self.state == State::Searching {
+                self.state = State::Browsing;
+                self.input.clear();
+            },
+            KeyCode::Backspace => {
+                match self.state {
+                    State::Searching => { self.input.pop(); },
+                    State::Browsing => self.back()
+                }
+            },
+            KeyCode::Enter => {
+                match self.state {
+                    State::Searching => self.state = State::Browsing,
+                    State::Browsing => self.cd()
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn cd(&mut self) {
+        if self.filtered[self.selected].is_dir() {
+            self.cwd = self.filtered[self.selected].clone();
+            let _ = get_directory_contents(&self.cwd, &mut self.contents);
+            self.input.clear();
+            self.selected = 0;
+        }
+    }
+
+    fn back(&mut self) {
+        let original = self.cwd.clone();
+        self.cwd = match self.cwd.parent() {
+            Some(parent) => parent.to_path_buf(),
+            None => return
+        };
+        let _ = get_directory_contents(&self.cwd, &mut self.contents);
+        
+        for (idx, item) in self.contents.iter().enumerate() {
+            if *item == original {
+                self.selected = idx;
+                break;
+            }
+        }
+    }
+
+    fn draw(&mut self, frame: &mut Frame, layout: Rc<[Rect]>) {
+        let title = Line::from(format!("[ {} - [{}] ]", self.cwd.to_str().unwrap(), if self.input.is_empty() { String::from(".*") } else { self.input.clone() }).bold()).green();
+        let input = match self.state {
+            State::Searching => Line::from(format!("[ {} ]", self.input).white()),
+            State::Browsing => Line::from(format!(" {}/{} ", self.selected + 1, self.length))
+        };
+
+
+        let block = Block::bordered().title(title.centered()).title_bottom(input.centered()).border_set(border::THICK);
+
+        let r = match Regex::new(&self.input) {
+            Ok(r) => r,
+            Err(_) => {
+                self.input.clear();
+                Regex::new(".*").unwrap()
+            }
+        };
+
+        self.length = 0;
+        self.filtered = vec![];
+
+        let filelist = List::from(self.contents.iter().filter(|x| match self.input.is_empty() {
+            true => true,
+            false => r.is_match(&x.file_name().unwrap().to_string_lossy().to_string())
+        }).enumerate().map(|x| Line::from(match { self.length += 1; self.filtered.push(x.1.clone()); x.1.is_dir() } {
+            true => x.1.file_name().unwrap().to_string_lossy().to_string().blue(),
+            false => x.1.file_name().unwrap().to_string_lossy().to_string().white()
+        })).collect()).highlight_style(Style::new()).highlight_symbol(">>").repeat_highlight_symbol(true);
+
+        if self.selected >= self.filtered.len() {
+            self.selected = 0;
+        }
+
+        let mut preview: Vec<PathBuf> = vec![];
+        let mut preview_string: Vec<String> = vec![];
+        if self.filtered.len() > 0 {
+            if self.filtered[self.selected].is_dir() { let _ = get_directory_contents(&self.filtered[self.selected], &mut preview); } 
+            else { preview_string = get_raw_contents(&self.filtered[self.selected]);}
+        }
+
+        let preview_list = match preview_string.is_empty() {
+            true => {
+                List::from(preview.iter().map(|x| {
+                let s = x.file_name().unwrap().to_string_lossy().to_string();
+                match x.is_dir() {
+                    true => Line::from(s).blue(),
+                    false => Line::from(s).white()
+                }
+            }).collect())},
+            
+            false => {
+                List::from(preview_string.iter().map(|x| Line::from(x.clone())).collect())
+            }
+        };
+
+        let block2 = if self.filtered.len() > 0 {
+            if self.filtered[self.selected].is_dir() {
+                Block::bordered().title(Line::from(format!("{}", self.filtered[self.selected].file_name().unwrap().to_string_lossy().to_string())).centered())
+            } else {
+                Block::bordered().title(Line::from(" - ").centered())
+            }.border_set(border::THICK)
+        } else {
+            Block::bordered().title(Line::from(" - ").centered()).border_set(border::THICK)
+        };
+
+        frame.render_stateful_widget(filelist.block(block), layout[0], &mut self.browse_state);
+        frame.render_stateful_widget(preview_list.block(block2), layout[1], &mut self.browse_state);
+    }
+}
