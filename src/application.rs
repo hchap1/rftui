@@ -2,17 +2,11 @@ use std::path::PathBuf;
 use regex::Regex;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
-    style::Style,
-    layout::{Constraint, Layout, Rect},
-    style::Stylize,
-    symbols::border,
-    text::Line,
-    widgets::{Block, List, ListState},
-    DefaultTerminal, Frame,
+    layout::{Constraint, Layout, Rect}, style::{Color, Style, Stylize}, symbols::border, text::{Line, Span}, widgets::{Block, List, ListState}, DefaultTerminal, Frame
 };
 use std::rc::Rc;
 
-use crate::filesystem::{get_directory_contents, get_raw_contents};
+use crate::filesystem::{get_directory_contents, get_raw_contents, SyntaxHighlighter, SyntaxLine};
 
 #[derive(PartialEq, Eq)]
 enum State {
@@ -30,7 +24,8 @@ pub struct Application {
     input: String,
     state: State,
     browse_state: ListState,
-    pub clipboard: Option<String>
+    pub clipboard: Option<String>,
+    highlighter: SyntaxHighlighter
 }
 
 impl Application {
@@ -45,7 +40,8 @@ impl Application {
             input: String::new(),
             state: State::Browsing,
             browse_state: ListState::default(),
-            clipboard: None
+            clipboard: None,
+            highlighter: SyntaxHighlighter::new()
         };
 
         match get_directory_contents(&application.cwd, &mut application.contents) {
@@ -197,27 +193,27 @@ impl Application {
             self.selected = 0;
         }
 
-        let mut preview: Vec<PathBuf> = vec![];
-        let mut preview_string: Vec<String> = vec![];
+        let mut preview: Vec<SyntaxLine> = vec![];
+
         if self.filtered.len() > 0 {
-            if self.filtered[self.selected].is_dir() { let _ = get_directory_contents(&self.filtered[self.selected], &mut preview); } 
-            else { preview_string = get_raw_contents(&self.filtered[self.selected]);}
+            if self.filtered[self.selected].is_file() {
+                preview = self.highlighter.load_file(&self.filtered[self.selected]);
+            }
         }
 
-        let preview_list = match preview_string.is_empty() {
-            true => {
-                List::from(preview.iter().map(|x| {
-                let s = x.file_name().unwrap().to_string_lossy().to_string();
-                match x.is_dir() {
-                    true => Line::from(s).blue(),
-                    false => Line::from(s).white()
-                }
-            }).collect())},
-            
-            false => {
-                List::from(preview_string.iter().map(|x| Line::from(x.clone())).collect())
-            }
-        };
+        let preview_list = List::from(
+            preview.iter().map(|x|
+                Line::from(
+                    (0..x.text.len()).map(|i| x.text[i].clone().fg(
+                        Color::Rgb(
+                            x.colour[i].0,
+                            x.colour[i].1,
+                            x.colour[i].2
+                        )
+                    )).collect::<Vec<Span<>>>()
+                )
+            ).collect()
+        );
 
         let block2 = if self.filtered.len() > 0 {
             if self.filtered[self.selected].is_dir() {
